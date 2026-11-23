@@ -1,0 +1,93 @@
+#!/bin/bash
+# 灯光桥接 · 会话骨架守护 v1.8（隐私版：DSH + Claude 双侧骨架）
+# v1.8：Claude 侧镜像改为 <项目>/<会话>/session.v1.jsonl —— MLight 的 ClaudeMonitor 只认
+#       session.v*.jsonl 文件名（v1.7 保留 <uuid>.jsonl 原名，灯从未检测到过 Claude 运行）。
+# 原则：原文件只读；解析全部在内存中完成；两个镜像目录里只写「无内容骨架事件」。
+#  - DSH：    ~/.dsh/sessions/**.jsonl.zstd   → ~/.mlight-dsh-mirror/**.jsonl（回合/提问标记）
+#  - Claude： ~/.claude/projects/**.jsonl     → ~/.mlight-claude-mirror/**/session.v1.jsonl（user/assistant标记，内容为"."）
+NODE=__NODE_PATH__
+SRC="$HOME/.dsh/sessions";      DST="$HOME/.mlight-dsh-mirror"
+CSRC="$HOME/.claude/projects";  CDST="$HOME/.mlight-claude-mirror"
+LOG="$HOME/Library/Logs/灯光桥接/mirror.log"
+mkdir -p "$(dirname "$LOG")" "$DST" "$CDST"
+# 滑窗时间基准（防缝隙竞态，macOS 兼容）：每轮扫描前把时间戳文件盖到「本轮开始-1秒」，
+# 重复处理由 DSH 序号游标 / Claude 行数游标去重。初值回看1小时以补积压。
+LAST_D=$(date -v-3600S +%s); LAST_C=$(date -v-3600S +%s)
+ST="$DST/.stamp"; CST="$CDST/.stamp"
+log(){ echo "$(date '+%m-%d %H:%M:%S') $*" >> "$LOG"; }
+[ -f "$LOG" ] && [ "$(stat -f%z "$LOG" 2>/dev/null || echo 0)" -gt 1048576 ] && : > "$LOG" && log "日志过大已清空"
+# 自愈：给 MLight 的 Claude 网络采样提供固定假数据，使它永远不跑 nettop 读本机流量统计。
+NB_FIX="$DST/.claude-net-bytes"
+[ -f "$NB_FIX" ] && [ "$(cat "$NB_FIX" 2>/dev/null)" = "0 0" ] || printf '0 0\n' > "$NB_FIX"
+
+# DSH 侧：zstd 内存解压 → 只输出 turn/提问 骨架
+DJS='const z=require("zlib"),fs=require("fs");const srcPath=process.argv[1],dstPath=process.argv[2];
+let text;try{text=z.zstdDecompressSync(fs.readFileSync(srcPath)).toString()}catch(e){process.exit(1)}
+let lastSeq=0;const pending=new Set();let had=false;
+try{for(const l of fs.readFileSync(dstPath,"utf8").split("\n")){if(!l)continue;let o;try{o=JSON.parse(l)}catch(e){continue}had=true;
+if(o.seq&&o.seq>lastSeq)lastSeq=o.seq;
+if(o.type==="tool/call"&&o.data&&o.data.callId)pending.add(o.data.callId);
+if(o.type==="tool/result"&&o.data&&o.data.message&&o.data.message.toolCallId)pending.delete(o.data.message.toolCallId);}}catch(e){}
+const out=[];
+if(!had)out.push({type:"session",version:4});
+for(const l of text.split("\n")){if(!l)continue;let o;try{o=JSON.parse(l)}catch(e){continue}
+const seq=o.seq||0;if(seq<=lastSeq)continue;const d=o.data||{};
+if(o.type==="turn/start"){out.push({type:o.type,seq:seq,time:o.time,data:{turn:d.turn}})}
+else if(o.type==="turn/end"){out.push({type:o.type,seq:seq,time:o.time,data:{turn:d.turn}})}
+else if(o.type==="tool/call"&&/ask.*question|askquestion/i.test(String(d.name||""))){out.push({type:o.type,seq:seq,time:o.time,data:{turn:d.turn,callId:d.callId,name:d.name}});pending.add(d.callId)}
+else if(o.type==="tool/result"){const m=d.message||{},tc=m.toolCallId;
+if(tc&&pending.has(tc)){out.push({type:o.type,seq:seq,time:o.time,data:{turn:d.turn,message:{role:"tool",toolCallId:tc,content:[{type:"text",text:"resolved"}],isError:false}}});pending.delete(tc)}}}
+if(out.length)fs.appendFileSync(dstPath,out.map(o=>JSON.stringify(o)).join("\n")+"\n");
+const st=fs.statSync(srcPath);try{fs.utimesSync(dstPath,st.atime,st.mtime)}catch(e){}'
+
+# Claude 侧：明文按行增量解析 → 只输出 user/assistant 骨架（内容全部替换为 "."）
+CJS='const fs=require("fs");const src=process.argv[1],dst=process.argv[2],stateFile=process.argv[3],rel=process.argv[4];
+const arr=fs.readFileSync(src,"utf8").split("\n");if(arr.length&&arr[arr.length-1]==="")arr.pop();
+let state={};try{state=JSON.parse(fs.readFileSync(stateFile,"utf8"))}catch(e){}
+let processed=Math.max(0,state[rel]|0);
+if(arr.length<processed){processed=0;try{fs.writeFileSync(dst,"")}catch(e){}}
+const out=[];
+for(let i=processed;i<arr.length;i++){let o;try{o=JSON.parse(arr[i])}catch(e){continue}
+if(o.type==="user"){let c=o.message&&o.message.content;let mc=".";
+if(Array.isArray(c))mc=c.map(b=>b&&b.type==="tool_result"?{type:"tool_result",tool_use_id:b.tool_use_id}:{type:"text",text:"."});
+out.push(JSON.stringify({type:"user",timestamp:o.timestamp,permissionMode:o.permissionMode||o["permission-mode"],message:{role:"user",content:mc}}))}
+else if(o.type==="assistant"){const m=o.message||{};let c=m.content;let mc=[{type:"text",text:"."}];
+if(Array.isArray(c))mc=c.map(b=>b&&b.type==="tool_use"?{type:"tool_use",id:b.id}:{type:"text",text:"."});
+const line={type:"assistant",timestamp:o.timestamp,message:{role:"assistant",content:mc}};
+if("stop_reason" in m)line.message.stop_reason=m.stop_reason;
+if("stop_sequence" in m)line.message.stop_sequence=m.stop_sequence;
+out.push(JSON.stringify(line))}}
+if(out.length)fs.appendFileSync(dst,out.join("\n")+"\n");
+state[rel]=arr.length;fs.writeFileSync(stateFile,JSON.stringify(state));
+const st=fs.statSync(src);try{fs.utimesSync(dst,st.atime,st.mtime)}catch(e){}'
+
+while :; do
+  if [ -d "$SRC" ]; then
+    T0=$(date +%s)
+    touch -t "$(date -r $((LAST_D - 1)) +%Y%m%d%H%M.%S)" "$ST" 2>/dev/null
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      rel="${f#"$SRC"/}"; out="$DST/${rel%.zstd}"
+      mkdir -p "$(dirname "$out")"
+      R=$("$NODE" -e "$DJS" "$f" "$out" 2>/dev/null)
+      [ -z "$R" ] && log "DSH解压失败(下轮重试): $f"
+    done < <(find "$SRC" -name "session.v*.jsonl.zstd" -newer "$ST" 2>/dev/null)
+    LAST_D=$T0
+  fi
+  if [ -d "$CSRC" ]; then
+    T1=$(date +%s)
+    touch -t "$(date -r $((LAST_C - 1)) +%Y%m%d%H%M.%S)" "$CST" 2>/dev/null
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      rel="${f#"$CSRC"/}"; out="$CDST/${rel%.jsonl}/session.v1.jsonl"
+      mkdir -p "$(dirname "$out")"
+      "$NODE" -e "$CJS" "$f" "$out" "$CDST/.state.json" "$rel" 2>/dev/null || log "Claude解析失败: $f"
+    done < <(find "$CSRC" -name "*.jsonl" -newer "$CST" 2>/dev/null)
+    LAST_C=$T1
+    # 清理：v1.7 遗留的旧命名镜像、14 天以上的过期骨架、空目录
+    find "$CDST" -mindepth 2 -maxdepth 2 -name "*.jsonl" ! -name "session.v*.jsonl" -delete 2>/dev/null
+    find "$CDST" -name "session.v1.jsonl" -mtime +14 -delete 2>/dev/null
+    find "$CDST" -mindepth 1 -type d -empty -delete 2>/dev/null
+  fi
+  sleep 2
+done
