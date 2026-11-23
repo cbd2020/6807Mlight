@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 灯光桥接 · 安装器  v1.4（隐私版 · launchd 常驻）
+# 灯光桥接 · 安装器  v1.4.1（隐私版 · launchd 常驻 · 可自动装原厂包）
 # 作用：让 6807AI状态灯MLight 识别 DeepSeek Harness（DSH，命令行/Web版）
 #       与 Claude Code 终端版的运行状态。
 # 隐私原则：DSH/Claude 原文件只读；解压解析全部在内存完成；给状态灯
@@ -17,6 +17,11 @@
 #      （KeepAlive：崩溃/退出自动拉起，登录自启）。
 #   3) 守护脚本不再内嵌在本安装器里，改由「桥接守护/」目录提供模板，
 #      安装时只替换 node 路径占位符（改守护不再需要改安装器）。
+# v1.4.1（2026-11-23）：
+#   4) 收编原厂原始包（原厂原始包/：dmg + 官方安装说明 + 厂商 zip 原件）。
+#      本机没装 MLight 时自动挂载仓库里的原厂 dmg 并弹出官方安装器
+#      （厂商是 GUI 向导且有 Gatekeeper 校验，「开始安装」必须人工点），
+#      装完自动继续；MLight 缺开机配置时自动启动一次补生成。
 # ============================================================
 set -u
 cd "$(dirname "$0")"
@@ -25,6 +30,9 @@ APP="/Applications/$APP_NAME.app"
 PLIST="$HOME/Library/LaunchAgents/local.mlight.6807.autostart.plist"
 LABEL="local.mlight.dsh-bridge"
 BPLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+MLIGHT_APP="/Applications/6807AI状态灯MLight.app"
+MLIGHT_LAUNCHER="/Applications/6807AI状态灯MLight启动.app"
+MLIGHT_PLIST="$HOME/Library/LaunchAgents/local.mlight.6807.autostart.plist"
 
 say(){ printf "\033[1;36m[安装]\033[0m %s\n" "$*"; }
 err(){ printf "\033[1;31m[错误]\033[0m %s\n" "$*"; }
@@ -37,9 +45,24 @@ if [ ! -f "桥接守护/dsh-bridge" ] || [ ! -f "桥接守护/$LABEL.plist" ]; t
   err "缺「桥接守护」目录（dsh-bridge 与 launchd 配置模板）。请完整拷贝/克隆整个仓库后再安装。"
   exit 1
 fi
-if [ ! -d "/Applications/6807AI状态灯MLight.app" ]; then
-  err "没有找到 /Applications/6807AI状态灯MLight.app —— 请先安装 6807AI状态灯MLight 1.2.1 再运行本安装器。"
-  exit 1
+if [ ! -d "$MLIGHT_APP" ]; then
+  DMG="$(ls 原厂原始包/*/6807AI状态灯MLight-macOS-1.2.1.dmg 2>/dev/null | head -1)"
+  if [ -z "$DMG" ]; then
+    err "没有找到 $MLIGHT_APP，仓库里也没有原厂安装镜像（原厂原始包/）。请先按厂商说明安装 6807AI状态灯MLight 1.2.1。"
+    exit 1
+  fi
+  say "本机没装 MLight，自动挂载仓库原厂镜像并启动官方安装器…"
+  MNT="$(hdiutil attach "$DMG" -nobrowse -readonly | tail -1 | cut -f3)"
+  if [ -z "$MNT" ] || [ ! -d "$MNT" ]; then err "原厂镜像挂载失败：$DMG"; exit 1; fi
+  INSTALLER_APP="$(find "$MNT" -maxdepth 2 -name "安装*.app" | head -1)"
+  [ -z "$INSTALLER_APP" ] && INSTALLER_APP="$(find "$MNT" -maxdepth 2 -name "*.app" | head -1)"
+  [ -z "$INSTALLER_APP" ] && { hdiutil detach "$MNT" -quiet 2>/dev/null; err "镜像里没找到官方安装器"; exit 1; }
+  open "$INSTALLER_APP"
+  say "官方安装窗口已弹出。若系统提示「无法验证打开者」：系统设置 → 隐私与安全性 → 点「仍要打开」；然后在窗口里点「开始安装」。装好后这里自动继续（最多等 5 分钟）…"
+  WAITED=0
+  while [ ! -d "$MLIGHT_APP" ] && [ "$WAITED" -lt 300 ]; do sleep 5; WAITED=$((WAITED+5)); done
+  hdiutil detach "$MNT" -quiet 2>/dev/null
+  [ -d "$MLIGHT_APP" ] || { err "等了 5 分钟仍未检测到 MLight 装好。手动完成官方安装器后重跑本安装器。"; exit 1; }
 fi
 ok "状态灯 MLight 已安装"
 
@@ -104,10 +127,19 @@ ok "守护已由 launchd 拉起（崩溃/退出会自动重启，登录自启）
 
 # ---------- 3. 给 MLight 的启动配置注入环境变量 ----------
 say "第3步 配置 MLight 环境变量"
-if [ ! -f "$PLIST" ]; then
-  err "没找到 MLight 的启动配置 $PLIST —— 请先启动一次 6807AI状态灯MLight（它会自动注册）再重跑本安装器。"
+if [ ! -f "$MLIGHT_PLIST" ]; then
+  say "MLight 还没生成开机启动配置，自动启动一次 MLight 补生成…"
+  if [ -d "$MLIGHT_LAUNCHER" ]; then open "$MLIGHT_LAUNCHER"; else open "$MLIGHT_APP"; fi
+  WAITED=0
+  while [ ! -f "$MLIGHT_PLIST" ] && [ "$WAITED" -lt 120 ]; do sleep 3; WAITED=$((WAITED+3)); done
+  osascript -e 'quit app "6807AI状态灯MLight"' >/dev/null 2>&1
+  sleep 2
+fi
+if [ ! -f "$MLIGHT_PLIST" ]; then
+  err "没找到 MLight 的启动配置 $MLIGHT_PLIST —— 请先启动一次 6807AI状态灯MLight（它会自动注册）再重跑本安装器。"
   exit 1
 fi
+PLIST="$MLIGHT_PLIST"
 SINCE_MS="$(date +%s)000"
 python3 - "$PLIST" "$SINCE_MS" <<'PYEOF'
 import plistlib, sys, subprocess

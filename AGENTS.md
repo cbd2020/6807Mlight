@@ -24,6 +24,8 @@
 cd /path/to/6807Mlight && bash 安装.command
 ```
 
+> 安装器 v1.4.1 起自动处理原厂包：本机没装 MLight 时，自动挂载仓库 `原厂原始包/` 里的 dmg 并弹出**官方 GUI 安装器**（厂商向导无法静默，「开始安装」必须人工点；Gatekeeper 拦截时在「系统设置 → 隐私与安全性」点「仍要打开」），装完自动继续；MLight 缺开机配置（`~/Library/LaunchAgents/local.mlight.6807.autostart.plist`）时自动启动一次 MLight 补生成后再写入环境变量。
+
 体检：
 
 ```bash
