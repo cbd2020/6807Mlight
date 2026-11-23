@@ -112,7 +112,7 @@ DSH 会话（~/.dsh/sessions）与 Claude 会话（~/.claude/projects）
 **问：想彻底删掉？**
 答：双击 `卸载.command`。状态灯 MLight 本体不受任何影响（ChatGPT/Codex 的识别是它原厂自带的）。
 
-## 参考部署（hymac 的机器，2026-11-23 验证状态）
+## 参考部署（Apple 芯片 Mac，2026-11-23 验证状态）
 
 - macOS（Apple 芯片），node v24.22.0（nvm），DSH 0.2.1-rc.5（`dsh web` 常驻），Claude Code
 - 守护 v1.8 由 launchd 代理 `local.mlight.dsh-bridge` 常驻运行中；DSH 回合运行中 → 黄灯呼吸，回合结束 → 绿灯；Claude / ChatGPT 连接正常。
